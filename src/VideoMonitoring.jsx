@@ -113,7 +113,7 @@ const VideoMonitoring = () => {
           videoRef.current.play()
           setRunning(true)
           setStatus('Monitoring LH8')
-          intervalRef.current = setInterval(detectFrame, 500)
+          intervalRef.current = setInterval(detectFrame, 300)  // Increased from 500ms for better accuracy
         })
         
         hls.on(Hls.Events.ERROR, (event, data) => {
@@ -149,7 +149,7 @@ const VideoMonitoring = () => {
       }
       setRunning(true)
       setStatus('Monitoring (Local Camera)')
-      intervalRef.current = setInterval(detectFrame, 500)
+      intervalRef.current = setInterval(detectFrame, 300)  // Increased from 500ms for better accuracy
     } catch (err) {
       console.error('Local camera error:', err)
       setStatus('Camera access denied')
@@ -220,7 +220,11 @@ const VideoMonitoring = () => {
     const v = videoRef.current
     const c = canvasRef.current
     if (!v || !c || v.readyState < 2) return
-     if (!v.videoWidth || !v.videoHeight) return
+    if (!v.videoWidth || !v.videoHeight) return
+    
+    // Skip frame if video is still buffering
+    if (v.paused && v !== videoRef.current?.parentElement) return
+    
     const w = Math.min(640, v.videoWidth)
     const h = Math.min(480, v.videoHeight)
     if (w === 0 || h === 0) return
@@ -274,9 +278,9 @@ const VideoMonitoring = () => {
     let totalBrightness = 0
     let pixelCount = 0
 
-    // Sample ceiling area only
-    for (let y = ceilingStartY; y < ceilingEndY; y += 4) {
-      for (let x = 0; x < w; x += 4) {
+    // Sample ceiling area only - process more pixels for accuracy
+    for (let y = ceilingStartY; y < ceilingEndY; y += 3) {
+      for (let x = 0; x < w; x += 3) {
         const i = (y * w + x) * 4
         if (i >= data.length) continue
         
@@ -295,15 +299,15 @@ const VideoMonitoring = () => {
 
     // Add to history
     brightnessHistoryRef.current.push(avgBrightness)
-    if (brightnessHistoryRef.current.length > 20) {
+    if (brightnessHistoryRef.current.length > 30) {
       brightnessHistoryRef.current.shift()
     }
 
-    // Establish baseline (first 20 frames)
-    if (!baselineBrightnessRef.current && brightnessHistoryRef.current.length >= 20) {
+    // Establish baseline (first 25 frames)
+    if (!baselineBrightnessRef.current && brightnessHistoryRef.current.length >= 25) {
       // Sort and take median to avoid outliers
       const sorted = [...brightnessHistoryRef.current].sort((a, b) => a - b)
-      baselineBrightnessRef.current = sorted[10]
+      baselineBrightnessRef.current = sorted[Math.floor(sorted.length / 2)]
     }
 
     // Determine status
@@ -341,10 +345,12 @@ const VideoMonitoring = () => {
     const columnCount = 16
     const colWidth = Math.floor(w/columnCount)
     const columnFlicker = []
+    
     for(let col = 0; col < columnCount; col++) {
       const startX = col * colWidth
       const endX = startX + colWidth
-      let colDiff = 0, pixelCount =0
+      let colDiff = 0
+      let pixelCount = 0
 
       for(let y = ceilingStartY; y < ceilingEndY; y+=2) {
         for(let x = startX; x < endX; x+=2) {
@@ -356,7 +362,9 @@ const VideoMonitoring = () => {
           pixelCount++
         }
       }
-      columnFlicker.push(pixelCount)
+      // Store actual flicker difference (not pixelCount) - FIX for critical bug
+      const avgColFlicker = pixelCount > 0 ? colDiff / pixelCount : 0
+      columnFlicker.push(avgColFlicker)
     }
 
     // Calculate overall flicker
@@ -364,33 +372,40 @@ const VideoMonitoring = () => {
     
     // Add to history
     fanFlickerHistoryRef.current.push(totalFlicker)
-    if (fanFlickerHistoryRef.current.length > 15) {
+    if (fanFlickerHistoryRef.current.length > 20) {
       fanFlickerHistoryRef.current.shift()
     }
     
     const history = fanFlickerHistoryRef.current 
-    if (history.length<10) return { detected: false, flicker: totalFlicker.toFixed(2) }
+    if (history.length < 8) return { detected: false, flicker: totalFlicker.toFixed(2), normalized: '0', crossings: 0, activeColumns: 0 }
+    
     const sorted = [...history].sort((a, b) => a - b)
     const baseline = sorted[Math.floor(sorted.length * 0.3)]
     const normalizedFlicker = totalFlicker - baseline
 
-    const recent = history.slice(-20)
+    const recent = history.slice(-15)
     const mean = recent.reduce((a, b) => a + b, 0) / recent.length
+    const stdDev = Math.sqrt(recent.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / recent.length)
 
-    let zeroCrossings = 0
+    // Count direction changes (more sensitive: just needs oscillation)
+    let directionChanges = 0
     for(let i = 1; i < recent.length; i++) {
-      const prev2 = recent[i-1] - mean
-      const curr = recent[i] - mean
-      if(prev2*curr <0 ) zeroCrossings++ //sign change implies crossing
+      if ((recent[i] - recent[i-1]) * (recent[i-1] - (i >= 2 ? recent[i-2] : recent[i-1])) < 0) {
+        directionChanges++
+      }
     }
 
-    const activeColumns = columnFlicker.filter(v=> v> baseline +1 ).length
-    const spatiallySpread = activeColumns>=4 
+    // Count flicker columns above baseline
+    const activeColumns = columnFlicker.filter(v => v > baseline + 0.5).length
+    const spatiallySpread = activeColumns >= 2  // Reduced from 4 to 2
 
-    const detected = normalizedFlicker > 1.5 && zeroCrossings>=4 && spatiallySpread
+    // Fan detected with more relaxed thresholds
+    const hasVariation = stdDev > 0.3
+    const hasFlicker = normalizedFlicker > 0.5  // Reduced from 1.5
+    const hasMotion = directionChanges >= 2  // Reduced from 4
+    const detected = hasVariation && hasFlicker && hasMotion && spatiallySpread
 
-    return { detected, flicker: totalFlicker.toFixed(2), normalized: normalizedFlicker.toFixed(2), crossings: zeroCrossings, activeColumns,
-  }
+    return { detected, flicker: totalFlicker.toFixed(2), normalized: normalizedFlicker.toFixed(2), crossings: directionChanges, activeColumns }
   }
 
   const detectPerson = (image, prev, w, h) => {
@@ -413,8 +428,8 @@ const VideoMonitoring = () => {
         let regionSum = 0
         let pixelCount = 0
         
-        for (let y = studentStartY + gy * regionHeight; y < studentStartY + (gy + 1) * regionHeight; y += 4) {
-          for (let x = gx * regionWidth; x < (gx + 1) * regionWidth; x += 4) {
+        for (let y = studentStartY + gy * regionHeight; y < studentStartY + (gy + 1) * regionHeight; y += 3) {
+          for (let x = gx * regionWidth; x < (gx + 1) * regionWidth; x += 3) {
             const i = (y * w + x) * 4
             if (i >= data.length) continue
             
@@ -443,7 +458,7 @@ const VideoMonitoring = () => {
     
     // Add to history
     motionHistoryRef.current.push({ score, activeRegions })
-    if (motionHistoryRef.current.length > 10) {
+    if (motionHistoryRef.current.length > 15) {
       motionHistoryRef.current.shift()
     }
     
