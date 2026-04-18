@@ -347,6 +347,10 @@ const CampusNavigation = () => {
     });
     return nodes;
   };
+
+  const isValidRoomSelection = (block, floor, room) => {
+    return !!ROOM_DATABASE[block]?.floors[floor]?.rooms[room];
+  };
   
   // Get neighbors of a node with edge weights
   const getNeighbors = (nodeId) => {
@@ -450,11 +454,14 @@ const CampusNavigation = () => {
     
     return { path, distance: distances[endNode] };
   };
-
-  // Generate navigation route
   const generateRoute = () => {
     if (!fromBlock || !fromFloor || !fromRoom || !toBlock || !toFloor || !toRoom) {
       alert('Please fill in all fields!');
+      return;
+    }
+
+    if (!isValidRoomSelection(fromBlock, fromFloor, fromRoom) || !isValidRoomSelection(toBlock, toFloor, toRoom)) {
+      alert('The room name is not in the correct format according to our database. Please select a valid room.');
       return;
     }
 
@@ -611,16 +618,27 @@ const CampusNavigation = () => {
   // Search rooms
   const searchRooms = () => {
     const results = [];
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return results;
+
     Object.entries(ROOM_DATABASE).forEach(([block, blockData]) => {
       Object.entries(blockData.floors).forEach(([floor, floorData]) => {
         Object.keys(floorData.rooms).forEach(room => {
-          if (room.toLowerCase().includes(searchQuery.toLowerCase())) {
+          if (room.toLowerCase().includes(query)) {
             results.push({ block, floor, room });
           }
         });
       });
     });
     return results;
+  };
+
+  const handleSearchKeyDown = (event) => {
+    if (event.key !== 'Enter') return;
+    const results = searchRooms();
+    if (searchQuery.trim() && results.length === 0) {
+      alert('The room name is not in the correct format according to our database.');
+    }
   };
 
   // Floor plan renderer
@@ -699,6 +717,7 @@ const CampusNavigation = () => {
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
+                  onKeyDown={handleSearchKeyDown}
                   placeholder="Search for any room (e.g., CL1, LH4, F3)..."
                   className="w-full px-4 py-3 pl-10 border-2 border-gray-300 rounded-lg focus:border-indigo-500 focus:outline-none"
                 />
